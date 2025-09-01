@@ -84,6 +84,8 @@ export class GameStore {
   private splitAdjusters = new Map<string, number>();
   // Equal-weight benchmark: shares bought at game start using startingCash
   private benchmarkShares = new Map<string, number>();
+  // Track which bankrupt tickers we've already processed/replaced
+  private delistedTickers = new Set<string>();
 
   constructor() {
     this.rng = new RNG();
@@ -100,16 +102,16 @@ export class GameStore {
 
   private buildSectors(): Record<SectorName, SectorIndex> {
     return {
-      Technology: new SectorIndex("Technology", { baselineGrowth: 0.003, peAdj: 1.15 }),
-      Healthcare: new SectorIndex("Healthcare", { baselineGrowth: 0.0023, peAdj: 1.06 }),
-      Energy: new SectorIndex("Energy", { baselineGrowth: 0.0017, peAdj: 0.95 }),
-      Utilities: new SectorIndex("Utilities", { baselineGrowth: 0.0012, peAdj: 0.9 }),
-      Consumer: new SectorIndex("Consumer", { baselineGrowth: 0.0020, peAdj: 1.02 }),
-      Industrials: new SectorIndex("Industrials", { baselineGrowth: 0.0018, peAdj: 0.98 }),
-      Financials: new SectorIndex("Financials", { baselineGrowth: 0.0019, peAdj: 0.96 }),
-      Materials: new SectorIndex("Materials", { baselineGrowth: 0.0016, peAdj: 0.94 }),
-      Communication: new SectorIndex("Communication", { baselineGrowth: 0.0021, peAdj: 1.03 }),
-      RealEstate: new SectorIndex("RealEstate", { baselineGrowth: 0.0015, peAdj: 0.92 })
+      Technology: new SectorIndex("Technology", { baselineGrowth: 0.0022, peAdj: 1.08 }),
+      Healthcare: new SectorIndex("Healthcare", { baselineGrowth: 0.0018, peAdj: 1.04 }),
+      Energy: new SectorIndex("Energy", { baselineGrowth: 0.0013, peAdj: 0.95 }),
+      Utilities: new SectorIndex("Utilities", { baselineGrowth: 0.0009, peAdj: 0.9 }),
+      Consumer: new SectorIndex("Consumer", { baselineGrowth: 0.0016, peAdj: 1.00 }),
+      Industrials: new SectorIndex("Industrials", { baselineGrowth: 0.0014, peAdj: 0.97 }),
+      Financials: new SectorIndex("Financials", { baselineGrowth: 0.0015, peAdj: 0.96 }),
+      Materials: new SectorIndex("Materials", { baselineGrowth: 0.0012, peAdj: 0.94 }),
+      Communication: new SectorIndex("Communication", { baselineGrowth: 0.0017, peAdj: 1.01 }),
+      RealEstate: new SectorIndex("RealEstate", { baselineGrowth: 0.0011, peAdj: 0.92 })
     };
   }
 
@@ -168,6 +170,50 @@ export class GameStore {
     for (const c of this.companies) {
       this.startingPrices.set(c.ticker, c.price);
     }
+  }
+
+  /** Generate a unique ticker not used by current companies */
+  private generateUniqueTicker(): string {
+    const existing = new Set(this.companies.map(c => c.ticker));
+    let t = "";
+    do {
+      t = Array.from({ length: 3 + Math.floor(this.rng.random() * 2) }, () =>
+        String.fromCharCode(65 + Math.floor(this.rng.random() * 26))
+      ).join("");
+    } while (existing.has(t));
+    return t;
+  }
+
+  /** Create a single replacement company, optionally preserving sector */
+  private createReplacementCompany(preserveSector?: SectorName): Company {
+    const sectorNames = Object.keys(this.sectors) as SectorName[];
+    const sector = preserveSector ?? this.rng.pick(sectorNames);
+    const risk: CompanyInit["riskProfile"] = this.rng.pick(["low", "medium", "high"]);
+    const stage: CompanyInit["stage"] = this.rng.pick(["startup", "growth", "mature", "decline"]);
+    const baseRevenue = 1_500_000 + this.rng.random() * 6_000_000;
+    const weeklyRevenue = baseRevenue / 48;
+    const expenseFactor = 0.5 + (risk === "high" ? 0.12 : risk === "medium" ? 0.07 : 0.03) + (stage === "startup" ? 0.12 : stage === "growth" ? 0.06 : 0);
+    const weeklyExpenses = weeklyRevenue * expenseFactor;
+    const init: CompanyInit = {
+      name: `${sector} Corp ${Math.floor(1000 + this.rng.random() * 9000)}`,
+      ticker: this.generateUniqueTicker(),
+      sector,
+      description: `${sector} company (${stage}, ${risk}).`,
+      revenue: weeklyRevenue,
+      expenses: weeklyExpenses,
+      shares: Math.floor(2_000_000 + this.rng.random() * 8_000_000),
+      riskProfile: risk,
+      stage,
+      payoutRatio: stage === "mature" ? 0.2 + this.rng.random() * 0.4 : 0,
+      targetYield: stage === "mature" ? 0.02 + this.rng.random() * 0.03 : undefined,
+      capexRate: sector === "Utilities" ? 0.08 : 0.03 + this.rng.random() * 0.05,
+      rAndDRate: stage === "startup" || stage === "growth" ? 0.1 + this.rng.random() * 0.15 : 0.02 + this.rng.random() * 0.04,
+      sentiment: this.rng.normal(0, 0.2),
+      cash: weeklyRevenue * (6 + this.rng.random() * 12),
+      debt: weeklyRevenue * (risk === "high" ? 40 : risk === "medium" ? 24 : 12),
+      assets: weeklyRevenue * (risk === "high" ? 80 : 120)
+    };
+    return new Company(init);
   }
 
   /**
@@ -420,6 +466,38 @@ export class GameStore {
         // update split adjuster so benchmark is de-split (price continuity)
         const prevAdj = this.splitAdjusters.get(c.ticker) ?? 1;
         this.splitAdjusters.set(c.ticker, prevAdj * c.pendingSplitFactor);
+      }
+    }
+
+    // Handle bankruptcies: wipe holdings and replace company with a new one
+    const toReplace: Array<{ index: number; oldTicker: string; sector: SectorName }> = [];
+    for (let i = 0; i < this.companies.length; i++) {
+      const c = this.companies[i];
+      if (c.isBankrupt && !this.delistedTickers.has(c.ticker)) {
+        // Wipe player and competitors' holdings at zero proceeds
+        if (this.holdings.has(c.ticker)) this.holdings.delete(c.ticker);
+        if (this.geminiHoldings.has(c.ticker)) this.geminiHoldings.delete(c.ticker);
+        if (this.claudeHoldings.has(c.ticker)) this.claudeHoldings.delete(c.ticker);
+        if (this.gpt5Holdings.has(c.ticker)) this.gpt5Holdings.delete(c.ticker);
+        // Remove benchmark exposure and split adjuster for old ticker
+        this.benchmarkShares.delete(c.ticker);
+        this.splitAdjusters.delete(c.ticker);
+        // Mark for replacement preserving sector
+        const sector = (c.sector as SectorName) ?? this.rng.pick(sectorsArr as unknown as SectorName[]);
+        toReplace.push({ index: i, oldTicker: c.ticker, sector });
+        this.delistedTickers.add(c.ticker);
+      }
+    }
+    if (toReplace.length) {
+      for (const r of toReplace) {
+        const newCo = this.createReplacementCompany(r.sector);
+        this.companies[r.index] = newCo;
+        // Initialize split adjuster for new ticker
+        this.splitAdjusters.set(newCo.ticker, 1);
+        // Do not add benchmark position automatically; keep it zero per rules
+        this.benchmarkShares.set(newCo.ticker, 0);
+        // Seed starting price for reference maps
+        this.startingPrices.set(newCo.ticker, newCo.price);
       }
     }
 

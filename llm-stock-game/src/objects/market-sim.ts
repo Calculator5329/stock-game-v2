@@ -162,13 +162,13 @@ export class MarketEnv {
 
   // Weekly baseline return for equities so the whole market averages ~5–15%/yr
   expectedEquityReturnWeekly(): number {
-    // Base around ~6–8%/yr -> ~0.0010–0.0016 weekly (48 weeks/year)
-    const base = 0.0010; // ~4.8% annual baseline before other effects; other terms add on
-    // Higher rates reduce expected returns a bit; positive sentiment nudges up
-    const rateDrag = (this.interestRate - 0.02) * 0.25; // 1% over 2% cuts ~0.0025 annually
-    const sentimentLift = this.sentiment * 0.0006;
+    // Lower base to curb long-run equity drift
+    const base = 0.00045;
+    // Stronger rate drag and gentler sentiment lift
+    const rateDrag = (this.interestRate - 0.02) * 0.35;
+    const sentimentLift = this.sentiment * 0.0002;
     const weekly = base - rateDrag / 48 + sentimentLift;
-    return clamp(weekly, 0.0001, 0.0018);
+    return clamp(weekly, 0.00005, 0.0012);
   }
 }
 
@@ -181,7 +181,7 @@ export class SectorIndex {
 
   constructor(name: string, init?: Partial<SectorIndex>) {
     this.name = name;
-    this.baselineGrowth = init?.baselineGrowth ?? 0.002;
+    this.baselineGrowth = init?.baselineGrowth ?? 0.0008;
     this.vol = init?.vol ?? 0.012;
     this.sentiment = init?.sentiment ?? 0;
     this.peAdj = init?.peAdj ?? 1.0;
@@ -189,7 +189,15 @@ export class SectorIndex {
 
   update(market: MarketEnv, rng: RNG): void {
     this.sentiment = clamp(this.sentiment * 0.9 + market.sentiment * 0.1 + rng.tnorm(0, 0.02, -0.08, 0.08), -1, 1);
-    this.baselineGrowth = clamp(this.baselineGrowth + rng.normal(0, 0.0004) + market.inflation / 4800, -0.005, 0.01);
+    // Lower baseline growth and link negatively to higher rates
+    this.baselineGrowth = clamp(
+      this.baselineGrowth + rng.normal(0, 0.00025) +
+      market.inflation / 4800 -
+      Math.max(0, market.interestRate - 0.02) / 3600 +
+      market.sentiment * 0.00005,
+      -0.004,
+      0.006
+    );
     this.peAdj = clamp(1 + this.sentiment * 0.25, 0.75, 1.35);
     this.vol = clamp(this.vol + rng.normal(0, 0.001), 0.006, 0.03);
   }
@@ -285,6 +293,8 @@ export class Company {
   capitalAllocationScore = 0; // accumulates good/bad capital allocation; decays weekly
   // Track last time the company undertook a restructuring to avoid spamming
   lastRestructureWeek = -1000;
+  // Recent EPS trend cache (for alpha)
+  // (No FCF usage by request)
 
   constructor(init: CompanyInit) {
     this.name = init.name;
@@ -452,22 +462,57 @@ export class Company {
 
     // 1) fundamentals evolve
     const stageGrowth =
-      this.stage === "startup" ? 0.0032 :
-      this.stage === "growth"  ? 0.0020 :
-      this.stage === "mature"  ? 0.0005 : -0.0005;
+      this.stage === "startup" ? 0.0010 :
+      this.stage === "growth"  ? 0.0007 :
+      this.stage === "mature"  ? 0.00010 : -0.0009;
 
-    const revMean =
+    // Growth baseline
+    let revMean =
       sector.baselineGrowth +
       stageGrowth +
       market.sentiment * 0.0007 +
       this.sentiment * 0.0008;
 
-    const revShock = rng.normal(0, 0.003);
+    // Heuristic: valuation-growth correlation
+    // Lower PE correlates with slower growth; higher PE with faster growth (relative to macro baseline)
+    // Compare to a simple market-sector PE anchor to avoid circularity with targetPE below
+    {
+      const peBaseForGrowth = market.basePE() * sector.peAdj;
+      const peNowSimple = this.peTTM;
+      if (peNowSimple != null) {
+        const rel = clamp((peNowSimple - peBaseForGrowth) / Math.max(1, peBaseForGrowth), -1, 1);
+        // Scale to a subtle weekly effect (~±0.0006)
+        const peGrowthAdj = 0.0006 * rel;
+        revMean += peGrowthAdj;
+      }
+    }
+
+    const revShock = rng.normal(0, 0.0015);
     this.revenue = Math.max(0, this.revenue * (1 + revMean + revShock));
 
     const inflationWeekly = market.inflation / 48;
-    const expMean = revMean * 0.7 + inflationWeekly * 0.8;
-    const expShock = rng.normal(0, 0.003);
+    // Higher sensitivity of expenses to inflation and growth
+    let expMean = revMean * 1.0 + inflationWeekly * 1.2;
+    // Heuristic: margin dynamics
+    // Low margins => greater potential for margin expansion (expenses grow slower)
+    // High margins => smaller, steadier earnings growth (expenses grow a touch faster)
+    {
+      const mNow = clamp(this.ttmMargin, -0.2, 0.6);
+      let marginAdj = 0;
+      if (mNow < 0.05) {
+        // Strong expansion pressure when margins are low
+        marginAdj = clamp((0.05 - mNow) * 0.12, 0, 0.012);
+      } else if (mNow > 0.25) {
+        // Gentle compression when margins are already high
+        marginAdj = -clamp((mNow - 0.25) * 0.08, 0, 0.008);
+      } else {
+        // Mild mean reversion toward mid-teens
+        marginAdj = clamp(0.002 * (0.15 - mNow), -0.004, 0.004);
+      }
+      // Apply as an offset to expense growth (subtract => slower expense growth => higher margins)
+      expMean -= marginAdj;
+    }
+    const expShock = rng.normal(0, 0.002);
     this.expenses = Math.max(0, this.expenses * (1 + expMean + expShock));
 
     // R&D, depreciation, interest, taxes
@@ -489,6 +534,7 @@ export class Company {
     const cfo = netIncome + depreciation;
     const cfi = -capex;
     let cff = 0;
+    // (FCF tracking removed by request)
 
     // operating assets and cash
     this.assets = Math.max(0, this.assets + capex - depreciation);
@@ -519,31 +565,33 @@ export class Company {
     this.moatScore = this.computeMoatScore();
 
     // 3) valuation targets
-    const basePE = market.basePE() * sector.peAdj;
+    // Lower valuation anchors (PE/PS) so prices revert faster and sit lower on average
+    const basePE = market.basePE() * sector.peAdj * 0.92;
     const stagePEAdj = this.stage === "startup" ? 1.2 : this.stage === "growth" ? 1.1 : this.stage === "mature" ? 1.0 : 0.85;
     const riskPEAdj = this.riskProfile === "low" ? 1.05 : this.riskProfile === "medium" ? 1.0 : 0.95;
     const sentPEAdj = 1 + clamp(this.sentiment, -1, 1) * 0.25;
-    // Slight moat premium to multiples
+    // Slight moat and ROIC premium to multiples
     const moatMultipleAdj = 1 + 0.05 * clamp(this.moatScore, 0, 1);
-    const targetPE = clamp(basePE * stagePEAdj * riskPEAdj * sentPEAdj * (1 + multipleAdj) * moatMultipleAdj, 12, 45);
+    const targetPE = clamp(basePE * stagePEAdj * riskPEAdj * sentPEAdj * (1 + multipleAdj) * moatMultipleAdj, 10, 30);
 
-    const basePS = 2.8;
-    const stagePS = this.stage === "startup" ? 6 : this.stage === "growth" ? 4 : this.stage === "mature" ? 2 : 1.4;
-    const ratePSAdj = clamp(1.6 - 8 * market.interestRate, 0.8, 1.6);
+    const basePS = 1.8;
+    const stagePS = this.stage === "startup" ? 3.5 : this.stage === "growth" ? 2.6 : this.stage === "mature" ? 1.4 : 1.1;
+    const ratePSAdj = clamp(1.4 - 6 * market.interestRate, 0.9, 1.4);
     const targetPS = clamp(basePS * stagePS * ratePSAdj * (1 + multipleAdj) * moatMultipleAdj, 1.0, 14);
 
     const epsTTM = this.ttmEPS;
     const spsTTM = this.ttmSalesPerShare || 1e-9;
 
-    // Treat this blended fundamental as an intrinsic anchor for MOS logic
+    // Treat this blended fundamental as an intrinsic anchor for MOS logic (EPS/PS only)
     const intrinsic = epsTTM > 0
-      ? 0.7 * targetPE * epsTTM + 0.3 * targetPS * spsTTM
+      ? 0.75 * targetPE * epsTTM + 0.25 * targetPS * spsTTM
       : targetPS * spsTTM;
 
     // 4) price dynamics with stronger mean reversion and momentum
-    const kappa = 0.06; // base mean reversion strength
-    // patience premium: higher moat -> stronger reversion toward intrinsic
-    const reversionStrength = kappa * (1 + 0.4 * this.moatScore);
+    const kappa = 0.12; // stronger mean reversion toward intrinsic to curb drifts
+    // patience premium: higher moat -> stronger reversion toward intrinsic and increase when far from intrinsic
+    const distance = clamp(Math.abs(intrinsic - this.price) / Math.max(1, intrinsic), 0, 2);
+    const reversionStrength = kappa * (1 + 0.4 * this.moatScore) * (1 + 0.5 * distance);
     const reversion = clamp((intrinsic - this.price) / Math.max(1, this.price), -0.25, 0.25) * reversionStrength;
 
     const marketShock = rng.normal(market.sentiment * 0.002, market.vol);
@@ -557,10 +605,11 @@ export class Company {
         Math.max(1, this.history[this.history.length - 1].price)
       : 0;
     // reduce momentum; more moat -> even lower
-    const momentumCoef = 0.006 * (1 - 0.3 * clamp(this.moatScore, 0, 1));
+    const momentumCoef = 0.0025 * (1 - 0.3 * clamp(this.moatScore, 0, 1));
     const momentum = momentumCoef * lastRet;
 
-    this.baseDrift = 0.00008 + this.margin * 0.004 + driftAdj; // lower drift and margin scaling
+    // Lower baseline drift and margin scaling to reduce structural outperformance
+    this.baseDrift = 0.00001 + this.margin * 0.0015 + driftAdj;
 
     const leverageBump = Math.max(0, this.debtToEquity - 1) * 0.003;
     const unprofitableBump = netIncome < 0 ? 0.004 : 0;
@@ -594,12 +643,13 @@ export class Company {
       const prevMargin = prevRev > 0 ? prevNi / prevRev : 0;
       marginTrend = clamp(this.ttmMargin - prevMargin, -0.2, 0.2);
     }
-    const qualityAlpha = 0.0012 * quality + 0.0012 * growth;
-    const valueAlpha = 0.0015 * Math.max(0, discountToIntrinsic) * mosScale + 0.0006 * discountSignalPE; // MOS-driven value bias
-    const trendAlpha = 0.0008 * marginTrend;
-    const capAllocAlpha = 0.0006 * this.capitalAllocationScore;
+    const qualityAlpha = 0.0006 * quality + 0.0006 * growth;
+    // Reduce value and trend contributions to curb outperformance vs benchmark
+    const valueAlpha = 0.0006 * Math.max(0, discountToIntrinsic) * mosScale + 0.0002 * discountSignalPE; // MOS-driven value bias
+    const trendAlpha = 0.0003 * marginTrend;
+    const capAllocAlpha = 0.0003 * this.capitalAllocationScore;
 
-    const retRaw =
+    let retRaw =
       this.baseDrift + market.expectedEquityReturnWeekly() +
       this.betaMarket * marketShock +
       this.betaSector * sectorShock +
@@ -611,8 +661,36 @@ export class Company {
       trendAlpha +
       capAllocAlpha;
 
+    // Fundamentals alignment alpha: reward improving EPS growth and margin stability
+    {
+      let epsTrend = 0;
+      if (this.history.length >= 96) {
+        let prevNi = 0, curNi = 0;
+        for (let i = this.history.length - 96; i < this.history.length - 48; i++) prevNi += this.history[i].netIncome;
+        for (let i = this.history.length - 48; i < this.history.length; i++) curNi += this.history[i].netIncome;
+        epsTrend = prevNi !== 0 ? clamp((curNi - prevNi) / Math.abs(prevNi), -0.5, 0.5) : 0;
+      }
+      const marginStability = clamp(1 - Math.abs(marginTrend) / 0.2, 0, 1);
+      const fundamentalAlpha = 0.00045 * epsTrend + 0.00025 * marginStability;
+      retRaw += fundamentalAlpha;
+    }
+
+    // Overheating penalty: decelerate returns after strong recent runs
+    if (this.history.length >= 24) {
+      const nowPrice = this.price;
+      const prevPrice = this.history[this.history.length - 24].price;
+      if (prevPrice > 0) {
+        const ret24 = (nowPrice - prevPrice) / prevPrice;
+        // Stronger convex penalty for outsized multi-month gains, tiny boost for drawdowns
+        const penalty = ret24 > 0
+          ? -Math.min(0.006, 0.003 * ret24 + 0.002 * ret24 * ret24)
+          : Math.max(-0.0010, 0.0005 * ret24);
+        retRaw += penalty;
+      }
+    }
+
     // clamp extreme weekly returns to avoid unrealistic spikes
-    const ret = clamp(retRaw, -0.10, 0.10); // slightly narrower weekly bounds
+    const ret = clamp(retRaw, -0.055, 0.055); // even tighter weekly bounds
 
     this.price = Math.max(0.5, this.price * (1 + ret));
 
@@ -735,11 +813,26 @@ export class Company {
     // distress or bankruptcy
     const minCash = 0.02 * this.revenue * 48 / 12; // about 2 weeks of revenue
     if (this.cash < 0) {
-      const raise = Math.min(Math.abs(this.cash) + minCash, 0.2 * Math.max(1, this.totalAssets));
+      const raise = Math.min(Math.abs(this.cash) + minCash, 0.15 * Math.max(1, this.totalAssets));
       this.debt += raise;
       this.cash += raise;
       cff += raise;
-      this.applyEvent({ type: "distress", description: "Emergency debt raise", priceShock: -0.03 }, week);
+      this.applyEvent({ type: "distress", description: "Emergency debt raise", priceShock: -0.04 }, week);
+    }
+
+    // Additional bankruptcy trigger: sustained negative earnings with poor coverage and high leverage
+    {
+      // Interest coverage using trailing metrics
+      const ttmNi = this.ttmNetIncome;
+      const avgInterest = this.debt * (this.lastBorrowRate / 48); // weekly proxy
+      const coverageWeak = avgInterest > 0 ? (ttmNi / 48) / avgInterest < -0.5 : false; // deeply negative coverage
+      const leverageHigh = this.debtToEquity > 6.0;
+      const longNeg = this.negativeQuarterStreak >= 10;
+      if (!this.isBankrupt && (leverageHigh && longNeg && coverageWeak)) {
+        this.applyEvent({ type: "bankruptcy", description: "Bankruptcy due to unsustainable leverage and losses", priceShock: -0.92 }, week);
+        this.isBankrupt = true;
+        this.price = Math.max(0.03, this.price * 0.15);
+      }
     }
 
     // If cash per share went to ~0, attempt a restructuring unless we're in clear bankruptcy territory
