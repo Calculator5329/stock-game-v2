@@ -25,6 +25,7 @@ export type EventType =
   | "supply_chain"
   | "macro_shock"
   | "distress"
+  | "restructure"
   | "bankruptcy";
 
 export interface Event {
@@ -282,6 +283,8 @@ export class Company {
   // Quality-related and policy tracking
   moatScore = 0.5; // 0..1 stability/durability score, recomputed weekly
   capitalAllocationScore = 0; // accumulates good/bad capital allocation; decays weekly
+  // Track last time the company undertook a restructuring to avoid spamming
+  lastRestructureWeek = -1000;
 
   constructor(init: CompanyInit) {
     this.name = init.name;
@@ -490,6 +493,9 @@ export class Company {
     // operating assets and cash
     this.assets = Math.max(0, this.assets + capex - depreciation);
     this.cash += cfo + cfi;
+
+    // Track if cash per share effectively hit zero before financing actions
+    const hitCashZero = this.cash <= 0 || this.sharesOutstanding <= 0;
 
     // 2) active effects
     let driftAdj = 0;
@@ -734,6 +740,29 @@ export class Company {
       this.cash += raise;
       cff += raise;
       this.applyEvent({ type: "distress", description: "Emergency debt raise", priceShock: -0.03 }, week);
+    }
+
+    // If cash per share went to ~0, attempt a restructuring unless we're in clear bankruptcy territory
+    if (hitCashZero && !this.isBankrupt && (week - this.lastRestructureWeek) > 48) {
+      // Only restructure if not severely overlevered; otherwise bankruptcy block below may handle it
+      const severeLeveragePre = this.debtToEquity > 5.0;
+      if (!severeLeveragePre || this.negativeQuarterStreak < 8) {
+        // Belt-tightening: reduce opex trajectory and investment rates to improve margins
+        this.rAndDRate = clamp(this.rAndDRate * 0.7, 0, 0.25);
+        this.capexRate = clamp(this.capexRate * 0.75, 0.005, 0.2);
+        // Immediate opex reduction via event effect and set a medium-term drift boost
+        this.applyEvent({
+          type: "restructure",
+          description: "Restructuring to improve margins",
+          expenseDeltaPct: -0.10,
+          priceShock: rng.normal(-0.06, 0.03),
+          driftDelta: 0.0006,
+          multipleDelta: 0.02,
+          sentimentDelta: -0.2,
+          durationWeeks: 24
+        }, week);
+        this.lastRestructureWeek = week;
+      }
     }
 
     // Make bankruptcy rarer and more clearly signaled
