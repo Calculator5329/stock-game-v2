@@ -1,0 +1,154 @@
+/* App shell */
+#root {
+  margin: 0 auto;
+  padding: 1.5rem;
+  text-align: left;
+}
+
+.game-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.15);
+  backdrop-filter: blur(8px);
+}
+
+.topbar h2 {
+  margin: 0;
+  background: linear-gradient(90deg, #93c5fd 0%, #a78bfa 50%, #f472b6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.grow { flex: 1; }
+
+.week { color: #9ca3af; }
+
+/* Cards grid */
+.cards-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 16px;
+}
+
+/* Stock Card */
+.stock-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #e5e7eb;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.20);
+  transition: box-shadow 160ms ease, transform 160ms ease, border-color 160ms ease;
+  backdrop-filter: blur(8px);
+}
+
+.stock-card:hover { box-shadow: 0 18px 36px rgba(0,0,0,0.30); transform: translateY(-2px); border-color: rgba(255,255,255,0.16); }
+
+.stock-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.stock-card__ticker { font-weight: 700; font-size: 16px; }
+.stock-card__name { color: #6b7280; font-size: 12px; }
+
+.stock-card__price { text-align: right; }
+.stock-card__price-main { font-weight: 600; }
+.stock-card__price-change { font-size: 12px; }
+
+.stock-card__charts { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 8px 0; }
+.mini-chart { background: radial-gradient(120% 140% at 0% 0%, #0b1020 0%, #0f172a 34%, #0b1324 100%); border: 1px solid #1f2937; border-radius: 10px; padding: 8px; position: relative; overflow: hidden; }
+.mini-chart::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(80% 60% at 0% 0%, rgba(255,255,255,0.06), transparent 50%); }
+.mini-chart__label { font-size: 11px; color: #c7d2fe; margin-bottom: 4px; letter-spacing: 0.02em; }
+
+.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 8px; }
+.stat .label { color: #9ca3af; font-size: 11px; }
+.stat .value { font-weight: 600; font-size: 13px; color: #e5e7eb; }
+
+.stock-card__trade {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.qty-input {
+  width: 72px;
+  padding: 6px 8px;
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.06);
+  color: #e5e7eb;
+}
+
+.btn {
+  padding: 6px 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+  border-radius: 8px;
+  cursor: pointer;
+  color: #e5e7eb;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.btn:hover { background: rgba(255,255,255,0.10); }
+
+.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.btn-primary {
+  border-color: rgba(37, 99, 235, 0.6);
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.85) 0%, rgba(37, 99, 235, 0.85) 100%);
+  color: white;
+  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.35);
+}
+
+.btn-primary:hover { background: linear-gradient(180deg, rgba(59, 130, 246, 0.95) 0%, rgba(29, 78, 216, 0.95) 100%); }
+
+/* Danger button for Sell */
+.btn-danger {
+  border-color: rgba(239, 68, 68, 0.6);
+  background: linear-gradient(180deg, rgba(248, 113, 113, 0.9) 0%, rgba(239, 68, 68, 0.9) 100%);
+  color: #fff;
+  box-shadow: 0 6px 14px rgba(239, 68, 68, 0.35);
+}
+
+.btn-danger:hover { background: linear-gradient(180deg, rgba(248, 113, 113, 0.95) 0%, rgba(220, 38, 38, 0.95) 100%); }
+
+.stock-card__held { margin-left: auto; color: #6b7280; font-size: 12px; }
+
+/* Pre-game */
+.pregame { display: flex; flex-direction: column; gap: 12px; }
+.pregame .subtitle { color: #6b7280; margin: 0; }
+.pregame-controls { display: flex; gap: 10px; align-items: center; }
+
+/* Portfolio summary panel */
+.portfolio-summary {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+  color: #e5e7eb;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.18);
+  backdrop-filter: blur(6px);
+}
+.portfolio-summary .label { color: #9ca3af; font-size: 12px; }
+.portfolio-summary .value { font-weight: 600; }
+
+/* Controls */
+.controls { display: flex; gap: 12px; align-items: center; }
