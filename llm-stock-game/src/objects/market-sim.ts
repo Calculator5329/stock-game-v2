@@ -279,6 +279,9 @@ export class Company {
   lastBorrowRate = 0.08;  // cached effective annual borrow rate
   // Expose share change factor for split-like actions so the store can adjust holdings
   pendingSplitFactor = 1;
+  // Quality-related and policy tracking
+  moatScore = 0.5; // 0..1 stability/durability score, recomputed weekly
+  capitalAllocationScore = 0; // accumulates good/bad capital allocation; decays weekly
 
   constructor(init: CompanyInit) {
     this.name = init.name;
@@ -439,6 +442,11 @@ export class Company {
       1
     );
 
+    // Decay rolling capital allocation score toward 0 (patience premium)
+    this.capitalAllocationScore *= 0.98;
+    if (this.capitalAllocationScore > 1) this.capitalAllocationScore = 1;
+    if (this.capitalAllocationScore < -1) this.capitalAllocationScore = -1;
+
     // 1) fundamentals evolve
     const stageGrowth =
       this.stage === "startup" ? 0.0032 :
@@ -501,38 +509,50 @@ export class Company {
       this.sentiment = clamp(this.sentiment + clamp(sentimentAdj, -0.5, 0.5), -1, 1);
     }
 
+    // 2.5) compute moat score from trailing stability (48 weeks if available)
+    this.moatScore = this.computeMoatScore();
+
     // 3) valuation targets
     const basePE = market.basePE() * sector.peAdj;
     const stagePEAdj = this.stage === "startup" ? 1.2 : this.stage === "growth" ? 1.1 : this.stage === "mature" ? 1.0 : 0.85;
     const riskPEAdj = this.riskProfile === "low" ? 1.05 : this.riskProfile === "medium" ? 1.0 : 0.95;
     const sentPEAdj = 1 + clamp(this.sentiment, -1, 1) * 0.25;
-    const targetPE = clamp(basePE * stagePEAdj * riskPEAdj * sentPEAdj * (1 + multipleAdj), 12, 45);
+    // Slight moat premium to multiples
+    const moatMultipleAdj = 1 + 0.05 * clamp(this.moatScore, 0, 1);
+    const targetPE = clamp(basePE * stagePEAdj * riskPEAdj * sentPEAdj * (1 + multipleAdj) * moatMultipleAdj, 12, 45);
 
     const basePS = 2.8;
     const stagePS = this.stage === "startup" ? 6 : this.stage === "growth" ? 4 : this.stage === "mature" ? 2 : 1.4;
     const ratePSAdj = clamp(1.6 - 8 * market.interestRate, 0.8, 1.6);
-    const targetPS = clamp(basePS * stagePS * ratePSAdj * (1 + multipleAdj), 1.0, 14);
+    const targetPS = clamp(basePS * stagePS * ratePSAdj * (1 + multipleAdj) * moatMultipleAdj, 1.0, 14);
 
     const epsTTM = this.ttmEPS;
     const spsTTM = this.ttmSalesPerShare || 1e-9;
 
-    const fundamental = epsTTM > 0
+    // Treat this blended fundamental as an intrinsic anchor for MOS logic
+    const intrinsic = epsTTM > 0
       ? 0.7 * targetPE * epsTTM + 0.3 * targetPS * spsTTM
       : targetPS * spsTTM;
 
     // 4) price dynamics with stronger mean reversion and momentum
-    const kappa = 0.06; // stronger mean reversion to fundamentals to curb compounding
-    const reversion = clamp((fundamental - this.price) / Math.max(1, this.price), -0.25, 0.25) * kappa;
+    const kappa = 0.06; // base mean reversion strength
+    // patience premium: higher moat -> stronger reversion toward intrinsic
+    const reversionStrength = kappa * (1 + 0.4 * this.moatScore);
+    const reversion = clamp((intrinsic - this.price) / Math.max(1, this.price), -0.25, 0.25) * reversionStrength;
 
     const marketShock = rng.normal(market.sentiment * 0.002, market.vol);
     const sectorShock = rng.normal(sector.sentiment * 0.002, sector.vol);
-    const idioShock = rng.normal(0, this.baseVol);
+    // damp idiosyncratic noise for high-moat names
+    const idioShockRaw = rng.normal(0, this.baseVol);
+    const idioShock = idioShockRaw * (1 - 0.5 * clamp(this.moatScore, 0, 1));
 
     const lastRet = this.history.length
       ? (this.price - this.history[this.history.length - 1].price) /
         Math.max(1, this.history[this.history.length - 1].price)
       : 0;
-    const momentum = 0.012 * lastRet; // reduce momentum to dampen compounding
+    // reduce momentum; more moat -> even lower
+    const momentumCoef = 0.006 * (1 - 0.3 * clamp(this.moatScore, 0, 1));
+    const momentum = momentumCoef * lastRet;
 
     this.baseDrift = 0.00008 + this.margin * 0.004 + driftAdj; // lower drift and margin scaling
 
@@ -543,12 +563,19 @@ export class Company {
       + leverageBump + unprofitableBump,
       0.008, 0.12
     );
+    // Moat reduces effective volatility baseline modestly
+    this.baseVol = clamp(this.baseVol * (1 - 0.3 * clamp(this.moatScore, 0, 1)), 0.006, 0.12);
 
     // Quality, value, and profitability-trend tilts: reward profitable growth and reasonable valuations
     const quality = clamp(this.ttmMargin, -0.2, 0.4); // margin proxy
     const growth = clamp((this.revenue - (this.history.length ? this.history[Math.max(0, this.history.length - 13)].revenue : this.revenue)) / Math.max(1e-6, (this.history.length ? this.history[Math.max(0, this.history.length - 13)].revenue : this.revenue)), -0.5, 0.5);
     const peNow = this.peTTM;
-    const discountSignal = peNow != null ? clamp((targetPE - peNow) / targetPE, -0.6, 0.6) : 0;
+    const discountSignalPE = peNow != null ? clamp((targetPE - peNow) / Math.max(1e-6, targetPE), -0.6, 0.6) : 0;
+    // Margin of safety emphasis vs intrinsic anchor
+    const discountToIntrinsic = intrinsic > 0 ? clamp((intrinsic - this.price) / intrinsic, -0.8, 0.8) : 0;
+    let mosScale = 0; // 0 above intrinsic, 0..1 taper between 0.85-1.0, >1 below 0.85
+    const ratio = intrinsic > 0 ? this.price / intrinsic : 1;
+    if (ratio < 0.85) mosScale = 1.5; else if (ratio < 1.0) mosScale = (1.0 - ratio) / 0.15; else mosScale = 0;
     // Profitability trend over prior year
     let marginTrend = 0;
     if (this.history.length >= 96) {
@@ -562,8 +589,9 @@ export class Company {
       marginTrend = clamp(this.ttmMargin - prevMargin, -0.2, 0.2);
     }
     const qualityAlpha = 0.0012 * quality + 0.0012 * growth;
-    const valueAlpha = 0.0012 * discountSignal;
+    const valueAlpha = 0.0015 * Math.max(0, discountToIntrinsic) * mosScale + 0.0006 * discountSignalPE; // MOS-driven value bias
     const trendAlpha = 0.0008 * marginTrend;
+    const capAllocAlpha = 0.0006 * this.capitalAllocationScore;
 
     const retRaw =
       this.baseDrift + market.expectedEquityReturnWeekly() +
@@ -574,7 +602,8 @@ export class Company {
       momentum +
       qualityAlpha +
       valueAlpha +
-      trendAlpha;
+      trendAlpha +
+      capAllocAlpha;
 
     // clamp extreme weekly returns to avoid unrealistic spikes
     const ret = clamp(retRaw, -0.10, 0.10); // slightly narrower weekly bounds
@@ -622,18 +651,50 @@ export class Company {
         }
       }
 
-      // buybacks when cheap vs fundamental and cashy
-      const cheapVsFundamental = fundamental > 0 && this.price < 0.9 * fundamental;
+      // buybacks vs issuance guided by intrinsic and cash buffer
       const cashBuffer = Math.max(0, 0.1 * this.revenue * 48 / 12); // about 5 weeks of revenue
-      if (cheapVsFundamental && this.cash > cashBuffer * 1.5 && this.buybackRate > 0) {
+      const cheapVsIntrinsic = intrinsic > 0 && this.price < 0.9 * intrinsic;
+      const expensiveVsIntrinsic = intrinsic > 0 && this.price > 1.15 * intrinsic;
+      if (cheapVsIntrinsic && this.cash > cashBuffer * 1.5 && this.buybackRate > 0) {
         const amount = this.buybackRate * (this.cash - cashBuffer);
-        const maxSharesThisQuarter = this.sharesOutstanding * 0.05; // cap 5% per quarter
+        const maxSharesThisQuarter = this.sharesOutstanding * 0.08; // cap 8% per quarter when cheap
         const sharesRepurchased = Math.min(amount / Math.max(1, this.price), maxSharesThisQuarter);
-        this.sharesOutstanding = Math.max(1_000_000, this.sharesOutstanding - sharesRepurchased);
-        this.cash -= amount;
-        cff -= amount;
-        this.price *= 1.01;
-        this.applyEvent({ type: "buyback", description: `Buyback $${amount.toFixed(0)}` }, week);
+        if (sharesRepurchased > 0) {
+          this.sharesOutstanding = Math.max(1_000_000, this.sharesOutstanding - sharesRepurchased);
+          this.cash -= amount;
+          cff -= amount;
+          this.price *= 1.015; // slightly stronger immediate effect
+          // capital allocation: reward
+          this.capitalAllocationScore = clamp(this.capitalAllocationScore + 0.05, -1, 1);
+          // tiny persistent drift boost
+          this.activeEffects.push({
+            untilWeek: week + 12,
+            driftDelta: 0.0004,
+            multipleDelta: 0,
+            sentimentDelta: 0
+          });
+          this.applyEvent({ type: "buyback", description: `Opportunistic buyback $${amount.toFixed(0)}` }, week);
+        }
+      } else if (expensiveVsIntrinsic && this.cash < cashBuffer * 0.6) {
+        // opportunistic equity issuance when richly valued to bolster balance sheet
+        const issueFrac = 0.03; // up to 3%
+        const newShares = Math.max(0, Math.floor(this.sharesOutstanding * issueFrac));
+        if (newShares > 0) {
+          this.sharesOutstanding += newShares;
+          const proceeds = newShares * this.price;
+          this.cash += proceeds;
+          cff += proceeds;
+          // capital allocation: slight penalty for dilution
+          this.capitalAllocationScore = clamp(this.capitalAllocationScore - 0.03, -1, 1);
+          // small negative persistent drift
+          this.activeEffects.push({
+            untilWeek: week + 12,
+            driftDelta: -0.0002,
+            multipleDelta: -0.01,
+            sentimentDelta: 0
+          });
+          this.applyEvent({ type: "upgrade", description: "Equity issuance at premium" }, week);
+        }
       }
 
       // forward split if too pricey
@@ -777,15 +838,38 @@ export class Company {
     if (ev.cashDelta) this.cash += ev.cashDelta;
     if (ev.debtDelta) this.debt = Math.max(0, this.debt + ev.debtDelta);
     if (ev.sharesDelta) this.sharesOutstanding = Math.max(1, this.sharesOutstanding + ev.sharesDelta);
+
+    const moat = clamp(this.moatScore, 0, 1);
+    const posSignal =
+      (ev.priceShock ?? 0) + (ev.driftDelta ?? 0) + (ev.multipleDelta ?? 0) + (ev.sentimentDelta ?? 0);
+    const isPositive = posSignal > 0;
+
+    // Price shock asymmetry: reduce negative shocks for high-moat firms
     if (typeof ev.priceShock === "number") {
-      this.price = Math.max(0.05, this.price * (1 + ev.priceShock));
+      const shock = ev.priceShock >= 0 ? ev.priceShock : ev.priceShock * (1 - 0.4 * moat);
+      this.price = Math.max(0.05, this.price * (1 + shock));
     }
+
+    // Persistent effects: longer for positive with moat, shorter/weaker for negative with moat
     if (ev.driftDelta || ev.multipleDelta || ev.sentimentDelta) {
+      const baseDur = ev.durationWeeks ?? 12;
+      const durMult = isPositive ? (1 + moat) : (1 - 0.4 * moat);
+      const until = currentWeek + Math.max(4, Math.round(baseDur * clamp(durMult, 0.6, 2)));
+      let drift = ev.driftDelta ?? 0;
+      let mult = ev.multipleDelta ?? 0;
+      let sent = ev.sentimentDelta ?? 0;
+      if (!isPositive) {
+        drift *= (1 - 0.5 * moat);
+        mult *= (1 - 0.5 * moat);
+      } else {
+        drift *= (1 + 0.3 * moat);
+        mult *= (1 + 0.2 * moat);
+      }
       this.activeEffects.push({
-        untilWeek: ev.durationWeeks ? currentWeek + ev.durationWeeks : currentWeek + 12,
-        driftDelta: ev.driftDelta ?? 0,
-        multipleDelta: ev.multipleDelta ?? 0,
-        sentimentDelta: ev.sentimentDelta ?? 0
+        untilWeek: until,
+        driftDelta: drift,
+        multipleDelta: mult,
+        sentimentDelta: sent
       });
     }
   }
@@ -808,6 +892,49 @@ export class Company {
       ps: this.ps,
       sentiment: this.sentiment
     };
+  }
+
+  // ---------- Quality metrics ----------
+
+  private computeMoatScore(): number {
+    const n = this.history.length;
+    if (n < 24) return clamp(0.5 * this.moatScore + 0.5 * 0.5, 0, 1);
+    const window = Math.min(64, n);
+    const start = n - window;
+    const margins: number[] = [];
+    const revGrowth: number[] = [];
+    for (let i = start; i < n; i++) {
+      const h = this.history[i];
+      const m = h.revenue > 0 ? h.netIncome / h.revenue : 0;
+      margins.push(clamp(m, -0.5, 0.6));
+      if (i > start) {
+        const prev = this.history[i - 1];
+        const g = prev.revenue > 0 ? Math.log(Math.max(1e-6, h.revenue) / Math.max(1e-6, prev.revenue)) : 0;
+        revGrowth.push(clamp(g, -0.5, 0.5));
+      }
+    }
+    const sharesStart = this.history[start].shares;
+    const sharesEnd = this.history[n - 1].shares;
+    const issuance = sharesEnd > 0 && sharesStart > 0 ? Math.max(0, (sharesEnd - sharesStart) / sharesStart) : 0;
+
+    const std = (arr: number[]) => {
+      if (arr.length <= 1) return 0;
+      const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+      const v = arr.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (arr.length - 1);
+      return Math.sqrt(Math.max(0, v));
+    };
+
+    const marginStd = std(margins);
+    const growthStd = std(revGrowth);
+    // Normalize: lower std => higher score
+    const marginScore = clamp(1 - marginStd / 0.06, 0, 1); // ~6pp std threshold
+    const growthScore = clamp(1 - growthStd / 0.06, 0, 1);
+    const shareScore = clamp(1 - issuance / 0.12, 0, 1); // >12% issuance over window -> 0
+
+    const raw = 0.45 * marginScore + 0.35 * growthScore + 0.20 * shareScore;
+    // Smooth with previous moatScore
+    const smoothed = 0.7 * this.moatScore + 0.3 * raw;
+    return clamp(smoothed, 0, 1);
   }
 }
 

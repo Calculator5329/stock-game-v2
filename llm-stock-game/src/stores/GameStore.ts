@@ -351,6 +351,8 @@ export class GameStore {
     const years = this.elapsedYears;
     if (years <= 0) return 0;
     const ratio = this.startingCash > 0 ? this.totalValue / this.startingCash : 1;
+    // Do not annualize if less than 1 simulated year has elapsed
+    if (years < 1) return (ratio - 1);
     return Math.pow(Math.max(ratio, 0.000001), 1 / Math.max(years, 0.000001)) - 1;
   }
 
@@ -361,6 +363,7 @@ export class GameStore {
     // Use investable benchmark value (equal-weight using starting cash),
     // not raw average price, so it is directly comparable to portfolio CAGR.
     const ratio = this.startingCash > 0 ? this.benchmarkValue / this.startingCash : 1;
+    if (years < 1) return (ratio - 1);
     return Math.pow(Math.max(ratio, 0.000001), 1 / Math.max(years, 0.000001)) - 1;
   }
 
@@ -571,6 +574,7 @@ export class GameStore {
     const years = this.elapsedYears;
     if (years <= 0) return 0;
     const ratio = this.startingCash > 0 ? this.geminiTotalValue / this.startingCash : 1;
+    if (years < 1) return (ratio - 1);
     return Math.pow(Math.max(ratio, 0.000001), 1 / Math.max(years, 0.000001)) - 1;
   }
 
@@ -593,6 +597,7 @@ export class GameStore {
     const years = this.elapsedYears;
     if (years <= 0) return 0;
     const ratio = this.startingCash > 0 ? this.claudeTotalValue / this.startingCash : 1;
+    if (years < 1) return (ratio - 1);
     return Math.pow(Math.max(ratio, 0.000001), 1 / Math.max(years, 0.000001)) - 1;
   }
 
@@ -615,6 +620,7 @@ export class GameStore {
     const years = this.elapsedYears;
     if (years <= 0) return 0;
     const ratio = this.startingCash > 0 ? this.gpt5TotalValue / this.startingCash : 1;
+    if (years < 1) return (ratio - 1);
     return Math.pow(Math.max(ratio, 0.000001), 1 / Math.max(years, 0.000001)) - 1;
   }
 

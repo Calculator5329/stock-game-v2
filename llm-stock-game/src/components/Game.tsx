@@ -65,7 +65,7 @@ function PortfolioSummary() {
       <div><div className="label">Holdings</div><div className="value"><Currency value={gameStore.holdingsValue} /></div></div>
       <div><div className="label">Total Value</div><div className="value"><Currency value={total} /></div></div>
       <div><div className="label">CAGR (You)</div><div className="value"><Percent value={cagrYou} /></div></div>
-      <div><div className="label">CAGR (Avg)</div><div className="value"><Percent value={cagrAvg} /></div></div>
+      <div><div className="label">CAGR (Benchmark)</div><div className="value"><Percent value={cagrAvg} /></div></div>
       <div><div className="label">CAGR (Gemini)</div><div className="value"><Percent value={cagrGem} /></div></div>
       <div><div className="label">CAGR (Claude)</div><div className="value"><Percent value={cagrClaude} /></div></div>
       <div><div className="label">CAGR (GPT-5)</div><div className="value"><Percent value={cagrGpt5} /></div></div>
