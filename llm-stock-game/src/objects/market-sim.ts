@@ -544,13 +544,26 @@ export class Company {
       0.008, 0.12
     );
 
-    // Quality and valuation tilts: reward profitable growth and discounts
+    // Quality, value, and profitability-trend tilts: reward profitable growth and reasonable valuations
     const quality = clamp(this.ttmMargin, -0.2, 0.4); // margin proxy
     const growth = clamp((this.revenue - (this.history.length ? this.history[Math.max(0, this.history.length - 13)].revenue : this.revenue)) / Math.max(1e-6, (this.history.length ? this.history[Math.max(0, this.history.length - 13)].revenue : this.revenue)), -0.5, 0.5);
     const peNow = this.peTTM;
     const discountSignal = peNow != null ? clamp((targetPE - peNow) / targetPE, -0.6, 0.6) : 0;
-    const qualityAlpha = 0.0010 * quality + 0.0010 * growth; // reduce alpha magnitudes
-    const valueAlpha = 0.0010 * discountSignal;
+    // Profitability trend over prior year
+    let marginTrend = 0;
+    if (this.history.length >= 96) {
+      let prevRev = 0, prevNi = 0;
+      for (let i = this.history.length - 96; i < this.history.length - 48; i++) {
+        const h = this.history[i];
+        prevRev += h.revenue;
+        prevNi += h.netIncome;
+      }
+      const prevMargin = prevRev > 0 ? prevNi / prevRev : 0;
+      marginTrend = clamp(this.ttmMargin - prevMargin, -0.2, 0.2);
+    }
+    const qualityAlpha = 0.0012 * quality + 0.0012 * growth;
+    const valueAlpha = 0.0012 * discountSignal;
+    const trendAlpha = 0.0008 * marginTrend;
 
     const retRaw =
       this.baseDrift + market.expectedEquityReturnWeekly() +
@@ -560,7 +573,8 @@ export class Company {
       reversion +
       momentum +
       qualityAlpha +
-      valueAlpha;
+      valueAlpha +
+      trendAlpha;
 
     // clamp extreme weekly returns to avoid unrealistic spikes
     const ret = clamp(retRaw, -0.10, 0.10); // slightly narrower weekly bounds

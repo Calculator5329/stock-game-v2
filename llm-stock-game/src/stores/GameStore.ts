@@ -521,6 +521,8 @@ export class GameStore {
       existing.avgCostBasis = newCost;
       this.holdings.set(ticker, existing);
     }
+    // price impact: buys push price up
+    this.applyTradeImpact(company, shares, "buy");
   }
 
   // Sell using a dollar amount rounded to nearest $1k
@@ -544,6 +546,8 @@ export class GameStore {
     } else {
       this.holdings.set(ticker, existing);
     }
+    // price impact: sells push price down
+    this.applyTradeImpact(company, qty, "sell");
   }
 
   // Average price helper removed; comparisons use benchmarkValue normalized to starting cash
@@ -701,6 +705,8 @@ export class GameStore {
     try {
       console.log("[Gemini] BUY executed", { ticker, shares, price: company.price, cost, remainingCash: this.geminiCash });
     } catch {}
+    // price impact
+    this.applyTradeImpact(company, shares, "buy");
   }
 
   private applyGeminiSell(ticker: string, dollars: number) {
@@ -722,6 +728,8 @@ export class GameStore {
     try {
       console.log("[Gemini] SELL executed", { ticker, shares: qty, price: company.price, proceeds, newCash: this.geminiCash });
     } catch {}
+    // price impact
+    this.applyTradeImpact(company, qty, "sell");
   }
 
   private applyClaudeBuy(ticker: string, dollars: number) {
@@ -746,6 +754,8 @@ export class GameStore {
     try {
       console.log("[Claude] BUY executed", { ticker, shares, price: company.price, cost, remainingCash: this.claudeCash });
     } catch {}
+    // price impact
+    this.applyTradeImpact(company, shares, "buy");
   }
 
   private applyClaudeSell(ticker: string, dollars: number) {
@@ -767,6 +777,8 @@ export class GameStore {
     try {
       console.log("[Claude] SELL executed", { ticker, shares: qty, price: company.price, proceeds, newCash: this.claudeCash });
     } catch {}
+    // price impact
+    this.applyTradeImpact(company, qty, "sell");
   }
 
   private applyGpt5Buy(ticker: string, dollars: number) {
@@ -791,6 +803,8 @@ export class GameStore {
     try {
       console.log("[GPT-5] BUY executed", { ticker, shares, price: company.price, cost, remainingCash: this.gpt5Cash });
     } catch {}
+    // price impact
+    this.applyTradeImpact(company, shares, "buy");
   }
 
   private applyGpt5Sell(ticker: string, dollars: number) {
@@ -812,6 +826,24 @@ export class GameStore {
     try {
       console.log("[GPT-5] SELL executed", { ticker, shares: qty, price: company.price, proceeds, newCash: this.gpt5Cash });
     } catch {}
+    // price impact
+    this.applyTradeImpact(company, qty, "sell");
+  }
+
+  /**
+   * Apply simple price impact from an immediate trade. Scales with sqrt of relative size
+   * and with a crude illiquidity proxy from the company's current baseVol.
+   */
+  private applyTradeImpact(company: Company, shares: number, side: "buy" | "sell") {
+    const sign = side === "buy" ? 1 : -1;
+    const floatShares = Math.max(1, company.sharesOutstanding);
+    const relativeSize = Math.max(0, shares) / floatShares;
+    // illiquidity: higher baseVol -> bigger impact; center around 0.02
+    const illiquidity = clamp(1 + 20 * (company.baseVol - 0.02), 0.6, 1.8);
+    const impactBase = 0.6; // tune global sensitivity
+    const rawImpact = impactBase * Math.sqrt(relativeSize) * illiquidity;
+    const impactPct = clamp(sign * rawImpact, -0.06, 0.06); // cap at +/-6%
+    company.price = Math.max(0.5, company.price * (1 + impactPct));
   }
 
   
